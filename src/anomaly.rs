@@ -20,6 +20,7 @@ pub enum AlertType {
     PathManipulation,
     ZombieNode,
     AsPathLoop,
+    RouteLeak,
     UnknownOrigin,
 }
 

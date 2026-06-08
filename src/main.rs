@@ -8,12 +8,14 @@ mod bgp_extract;
 mod parallel_processor;
 mod topology;
 mod anomaly;
+mod valley_free;
 mod terminal_ui;
 
 use parallel_processor::ParallelProcessor;
 use terminal_ui::TerminalUi;
 use topology::AsTopology;
 use anomaly::AnomalyDetector;
+use valley_free::ValleyFreeChecker;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -157,6 +159,26 @@ fn main() -> anyhow::Result<()> {
     TerminalUi::print_hub_paths(&topology, &hubs, args.paths);
 
     if !args.skip_anomaly {
+        println!(
+            "{} {}",
+            "◈".bright_cyan(),
+            "Inferring AS business relationships (Gao-Rexford)...".bright_white()
+        );
+        println!();
+
+        let checker = ValleyFreeChecker::new(&topology, &processor);
+        TerminalUi::print_valley_free_relationships(&checker);
+
+        println!(
+            "{} {}",
+            "◈".bright_red(),
+            "Running Valley-Free route leak validation...".bright_white()
+        );
+        println!();
+
+        let violations = checker.detect_route_leaks(&processor);
+        TerminalUi::print_valley_free_violations(&violations);
+
         println!(
             "{} {}",
             "◈".bright_red(),

@@ -2,6 +2,7 @@ use colored::*;
 use crate::anomaly::{AlertType, HijackAlert, ZombieNode};
 use crate::parallel_processor::ProcessingStats;
 use crate::topology::AsTopology;
+use crate::valley_free::{AsRelationship, LeakType, RouteLeakViolation, ValleyFreeChecker};
 
 pub struct TerminalUi;
 
@@ -251,6 +252,7 @@ impl TerminalUi {
                     AlertType::PathManipulation => "🟠 PATH MANIPULATION".bright_yellow().bold(),
                     AlertType::ZombieNode => "🟣 ZOMBIE NODE".bright_magenta().bold(),
                     AlertType::AsPathLoop => "🔴 AS-PATH LOOP".bright_red().bold(),
+                    AlertType::RouteLeak => "🚨 ROUTE LEAK".bright_red().bold(),
                     AlertType::UnknownOrigin => "🟡 UNKNOWN ORIGIN".bright_yellow().bold(),
                 };
 
@@ -389,6 +391,182 @@ impl TerminalUi {
 
         println!("{}", "╚══════════════════════════════════════════════════════════════════╝".bright_magenta());
         println!();
+    }
+
+    pub fn print_valley_free_relationships(checker: &ValleyFreeChecker) {
+        let stats = checker.relationship_stats();
+
+        println!("{}", "╔══════════════════════════════════════════════════════════════════╗".bright_cyan());
+        println!(
+            "{}{}{}",
+            "║ ".bright_cyan(),
+            "AS BUSINESS RELATIONSHIPS (Gao-Rexford)".bold().bright_white(),
+            "                    ║".bright_cyan()
+        );
+        println!("{}", "╠══════════════════════════════════════════════════════════════════╣".bright_cyan());
+        println!(
+            "{} {}{}{}",
+            "║".bright_cyan(),
+            "Total Inferred Links: ".dimmed(),
+            format!("{}", checker.total_relationships()).bright_green().bold(),
+            "                             ║".bright_cyan()
+        );
+
+        let p2c = stats.get("Provider→Customer").unwrap_or(&0);
+        let c2p = stats.get("Customer→Provider").unwrap_or(&0);
+        let p2p = stats.get("Peer↔Peer").unwrap_or(&0);
+
+        println!(
+            "{} {} {}{}",
+            "║".bright_cyan(),
+            "Provider→Customer:".dimmed(),
+            format!("{}", p2c).bright_yellow().bold(),
+            "                           ║".bright_cyan()
+        );
+        println!(
+            "{} {} {}{}",
+            "║".bright_cyan(),
+            "Customer→Provider:".dimmed(),
+            format!("{}", c2p).bright_yellow().bold(),
+            "                           ║".bright_cyan()
+        );
+        println!(
+            "{} {} {}{}",
+            "║".bright_cyan(),
+            "Peer↔Peer:        ".dimmed(),
+            format!("{}", p2p).bright_green().bold(),
+            "                           ║".bright_cyan()
+        );
+        println!(
+            "{} {}",
+            "║".bright_cyan(),
+            "Inference: Degree-ratio heuristic (ratio ≥ 0.6 → Peer)".dimmed()
+        );
+        println!("{}", "╚══════════════════════════════════════════════════════════════════╝".bright_cyan());
+        println!();
+    }
+
+    pub fn print_valley_free_violations(violations: &[RouteLeakViolation]) {
+        println!("{}", "╔══════════════════════════════════════════════════════════════════════════════╗".bright_red());
+        println!(
+            "{}{}{}",
+            "║ ".bright_red(),
+            "🚨 VALLEY-FREE ROUTE LEAK VIOLATIONS  🚨".bold().bright_white(),
+            "                                ║".bright_red()
+        );
+        println!("{}", "╠══════════════════════════════════════════════════════════════════════════════╣".bright_red());
+
+        if violations.is_empty() {
+            println!(
+                "{} {} {}",
+                "║".bright_red(),
+                "All AS-Paths comply with Valley-Free policy ✓".bright_green().bold(),
+                "                ║".bright_red()
+            );
+        } else {
+            println!(
+                "{} {} {}",
+                "║".bright_red(),
+                "Valley-Free violations detected:".bright_yellow().bold(),
+                format!(" {} violation(s)", violations.len()).bright_red().bold()
+            );
+            println!(
+                "{} {}",
+                "║".bright_red(),
+                "Path descending (p2c) then ascending (c2p) or crossing peer = LEAK".dimmed()
+            );
+            println!(
+                "{} {}",
+                "║".bright_red(),
+                "├─────────────────────────────────────────────────────────────────".dimmed()
+            );
+
+            let display_count = violations.len().min(25);
+            for (i, v) in violations[..display_count].iter().enumerate() {
+                let leak_label = match v.leak_type {
+                    LeakType::ValleyDownUp => "VALLEY (Down→Up)".bright_red().bold(),
+                    LeakType::ValleyDownPeer => "VALLEY (Down→Peer)".bright_red().bold(),
+                    LeakType::ValleyPeerUp => "VALLEY (Peer→Up)".bright_yellow().bold(),
+                    LeakType::MultiPeer => "MULTI-PEER".bright_magenta().bold(),
+                };
+
+                println!(
+                    "{} {} {} {}",
+                    "║".bright_red(),
+                    format!("[{:>2}]", i + 1).dimmed(),
+                    leak_label,
+                    format!("at hop {}", v.violation_index + 1).dimmed()
+                );
+
+                if !v.prefix.is_empty() {
+                    println!(
+                        "{}   {} {}",
+                        "║".bright_red(),
+                        "Prefix:".dimmed(),
+                        v.prefix.bright_cyan()
+                    );
+                }
+
+                let path_str = Self::format_valley_free_path(&v.as_path, &v.relationships);
+                println!(
+                    "{}   {} {}",
+                    "║".bright_red(),
+                    "AS-Path:".dimmed(),
+                    path_str
+                );
+
+                println!(
+                    "{}   {} {}",
+                    "║".bright_red(),
+                    "Violation:".dimmed(),
+                    v.violation_desc.bright_red()
+                );
+
+                if i < display_count - 1 {
+                    println!(
+                        "{} {}",
+                        "║".bright_red(),
+                        "├─────────────────────────────────────────────────────────────────".dimmed()
+                    );
+                }
+            }
+
+            if violations.len() > 25 {
+                println!(
+                    "{} {}",
+                    "║".bright_red(),
+                    format!("... and {} more violations", violations.len() - 25).dimmed()
+                );
+            }
+        }
+
+        println!("{}", "╚══════════════════════════════════════════════════════════════════════════════╝".bright_red());
+        println!();
+    }
+
+    fn format_valley_free_path(
+        as_path: &[u32],
+        relationships: &[Option<AsRelationship>],
+    ) -> String {
+        if as_path.is_empty() {
+            return String::new();
+        }
+
+        let mut parts = Vec::new();
+        parts.push(format!("AS{}", as_path[0]));
+
+        for (i, rel_opt) in relationships.iter().enumerate() {
+            let arrow = match rel_opt {
+                Some(AsRelationship::ProviderToCustomer) => "↓".bright_yellow().to_string(),
+                Some(AsRelationship::CustomerToProvider) => "↑".bright_cyan().to_string(),
+                Some(AsRelationship::PeerToPeer) => "⇄".bright_magenta().to_string(),
+                None => "→".dimmed().to_string(),
+            };
+            parts.push(arrow);
+            parts.push(format!("AS{}", as_path[i + 1]));
+        }
+
+        parts.join(" ")
     }
 
     pub fn print_completion_banner() {
