@@ -42,10 +42,7 @@ impl AnomalyDetector {
 
         let prefix_owners = Self::build_prefix_ownership(processor);
 
-        for entry in processor.prefix_as_map.iter() {
-            let prefix = entry.key();
-            let asns = entry.value();
-
+        for (prefix, asns) in &processor.prefix_as_map {
             let unique_asns: Vec<u32> = {
                 let mut seen = std::collections::HashSet::new();
                 asns.iter().filter(|a| seen.insert(**a)).copied().collect()
@@ -102,10 +99,7 @@ impl AnomalyDetector {
         let mut ownership = HashMap::new();
         let mut prefix_asn_count: HashMap<String, HashMap<u32, usize>> = HashMap::new();
 
-        for entry in processor.prefix_as_map.iter() {
-            let prefix = entry.key();
-            let asns = entry.value();
-
+        for (prefix, asns) in &processor.prefix_as_map {
             let counter = prefix_asn_count.entry(prefix.clone()).or_insert_with(HashMap::new);
             for &asn in asns.iter() {
                 *counter.entry(asn).or_insert(0) += 1;
@@ -168,10 +162,7 @@ impl AnomalyDetector {
     fn detect_as_path_loops(processor: &ParallelProcessor) -> Vec<HijackAlert> {
         let mut alerts = Vec::new();
 
-        for entry in processor.all_updates.iter() {
-            let _asn = *entry.key();
-            let updates = entry.value();
-
+        for (_asn, updates) in &processor.all_updates {
             for update in updates {
                 let flat_path = crate::bgp_extract::BgpExtractor::flatten_as_path(&update.as_path);
                 let mut seen = std::collections::HashSet::new();
@@ -207,10 +198,8 @@ impl AnomalyDetector {
     ) -> Vec<ZombieNode> {
         let mut zombies = Vec::new();
 
-        for entry in processor.all_updates.iter() {
-            let asn = *entry.key();
+        for (&asn, updates) in &processor.all_updates {
             if Self::is_zombie_asn(asn, topology) {
-                let updates = entry.value();
                 let affected_prefixes: Vec<String> = updates
                     .iter()
                     .flat_map(|u| u.announced_prefixes.iter().map(|p| p.cidr()))

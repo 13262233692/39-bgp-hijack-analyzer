@@ -30,24 +30,19 @@ impl AsTopology {
 
         let degree_map = processor.get_asn_degree_map();
 
-        for entry in processor.as_link_counts.iter() {
-            let (src_asn, dst_asn) = entry.key();
-
-            for &asn in &[*src_asn, *dst_asn] {
+        for &(src_asn, dst_asn) in processor.as_link_counts.keys() {
+            for &asn in &[src_asn, dst_asn] {
                 if !asn_to_idx.contains_key(&asn) {
-                    let degree = degree_map.get(&asn).map(|r| *r.value()).unwrap_or(0);
+                    let degree = *degree_map.get(&asn).unwrap_or(&0);
                     let idx = graph.add_node(AsNode { asn, degree });
                     asn_to_idx.insert(asn, idx);
                 }
             }
         }
 
-        for entry in processor.as_link_counts.iter() {
-            let (src_asn, dst_asn) = entry.key();
-            let weight = *entry.value();
-
+        for (&(src_asn, dst_asn), &weight) in &processor.as_link_counts {
             if let (Some(&src_idx), Some(&dst_idx)) =
-                (asn_to_idx.get(src_asn), asn_to_idx.get(dst_asn))
+                (asn_to_idx.get(&src_asn), asn_to_idx.get(&dst_asn))
             {
                 graph.add_edge(src_idx, dst_idx, AsEdge { weight });
             }

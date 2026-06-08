@@ -128,15 +128,7 @@ fn main() -> anyhow::Result<()> {
     );
     println!();
 
-    let processor = ParallelProcessor::new();
-
-    println!(
-        "{} {}",
-        "◈".bright_yellow(),
-        "Processing MRT records...".bright_white()
-    );
-
-    let stats = processor.process_files(&mrt_files)?;
+    let (processor, stats) = ParallelProcessor::process_files(&mrt_files)?;
 
     TerminalUi::print_stats(&stats);
 

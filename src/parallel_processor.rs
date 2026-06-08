@@ -1,8 +1,9 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
-use dashmap::DashMap;
+use crossbeam_channel::bounded;
 use rayon::prelude::*;
 
 use crate::bgp_extract::{BgpExtractor, BgpUpdate};
@@ -17,26 +18,63 @@ pub struct ProcessingStats {
     pub elapsed_ms: u64,
 }
 
+enum ProcessingMessage {
+    PrefixAsn {
+        prefix: String,
+        asns: Vec<u32>,
+    },
+    AsLink {
+        from: u32,
+        to: u32,
+    },
+    Update {
+        origin_as: u32,
+        update: BgpUpdate,
+    },
+}
+
 pub struct ParallelProcessor {
-    pub prefix_as_map: DashMap<String, Vec<u32>>,
-    pub as_link_counts: DashMap<(u32, u32), u64>,
-    pub all_updates: DashMap<u32, Vec<BgpUpdate>>,
+    pub prefix_as_map: HashMap<String, Vec<u32>>,
+    pub as_link_counts: HashMap<(u32, u32), u64>,
+    pub all_updates: HashMap<u32, Vec<BgpUpdate>>,
 }
 
 impl ParallelProcessor {
-    pub fn new() -> Self {
-        Self {
-            prefix_as_map: DashMap::new(),
-            as_link_counts: DashMap::new(),
-            all_updates: DashMap::new(),
-        }
-    }
-
-    pub fn process_files(&self, paths: &[PathBuf]) -> anyhow::Result<ProcessingStats> {
+    pub fn process_files(paths: &[PathBuf]) -> anyhow::Result<(Self, ProcessingStats)> {
         let total_records = AtomicU64::new(0);
         let bgp_updates = AtomicU64::new(0);
         let as_path_entries = AtomicU64::new(0);
         let start = Instant::now();
+
+        let (tx, rx) = bounded::<ProcessingMessage>(65536);
+
+        let aggregator_handle = std::thread::spawn(move || {
+            let mut prefix_as_map: HashMap<String, Vec<u32>> = HashMap::new();
+            let mut as_link_counts: HashMap<(u32, u32), u64> = HashMap::new();
+            let mut all_updates: HashMap<u32, Vec<BgpUpdate>> = HashMap::new();
+
+            while let Ok(msg) = rx.recv() {
+                match msg {
+                    ProcessingMessage::PrefixAsn { prefix, asns } => {
+                        prefix_as_map
+                            .entry(prefix)
+                            .or_insert_with(Vec::new)
+                            .extend(asns);
+                    }
+                    ProcessingMessage::AsLink { from, to } => {
+                        *as_link_counts.entry((from, to)).or_insert(0) += 1;
+                    }
+                    ProcessingMessage::Update { origin_as, update } => {
+                        all_updates
+                            .entry(origin_as)
+                            .or_insert_with(Vec::new)
+                            .push(update);
+                    }
+                }
+            }
+
+            (prefix_as_map, as_link_counts, all_updates)
+        });
 
         paths.par_iter().for_each(|path| {
             if let Ok(data) = Self::read_mrt_file(path) {
@@ -52,46 +90,55 @@ impl ParallelProcessor {
                         }
 
                         for prefix in &update.announced_prefixes {
-                            let key = prefix.cidr();
-                            self.prefix_as_map
-                                .entry(key)
-                                .or_insert_with(Vec::new)
-                                .value_mut()
-                                .extend_from_slice(&flat_path);
+                            let _ = tx.send(ProcessingMessage::PrefixAsn {
+                                prefix: prefix.cidr(),
+                                asns: flat_path.clone(),
+                            });
                         }
 
                         for window in flat_path.windows(2) {
-                            let link = (window[0], window[1]);
-                            *self
-                                .as_link_counts
-                                .entry(link)
-                                .or_insert(0)
-                                .value_mut() += 1;
+                            let _ = tx.send(ProcessingMessage::AsLink {
+                                from: window[0],
+                                to: window[1],
+                            });
                         }
 
                         if let Some(origin) = update.origin_as {
-                            self.all_updates
-                                .entry(origin)
-                                .or_insert_with(Vec::new)
-                                .value_mut()
-                                .push(update);
+                            let _ = tx.send(ProcessingMessage::Update {
+                                origin_as: origin,
+                                update,
+                            });
                         }
                     }
                 });
             }
         });
 
-        let unique_prefixes = self.prefix_as_map.len() as u64;
-        let unique_asns = self.all_updates.len() as u64;
+        drop(tx);
 
-        Ok(ProcessingStats {
+        let (prefix_as_map, as_link_counts, all_updates) = aggregator_handle
+            .join()
+            .map_err(|_| anyhow::anyhow!("Aggregator thread panicked"))?;
+
+        let unique_prefixes = prefix_as_map.len() as u64;
+        let unique_asns = all_updates.len() as u64;
+
+        let processor = Self {
+            prefix_as_map,
+            as_link_counts,
+            all_updates,
+        };
+
+        let stats = ProcessingStats {
             total_records: total_records.load(Ordering::Relaxed),
             bgp_updates: bgp_updates.load(Ordering::Relaxed),
             as_path_entries: as_path_entries.load(Ordering::Relaxed),
             unique_prefixes,
             unique_asns,
             elapsed_ms: start.elapsed().as_millis() as u64,
-        })
+        };
+
+        Ok((processor, stats))
     }
 
     fn read_mrt_file(path: &Path) -> anyhow::Result<Vec<u8>> {
@@ -133,14 +180,12 @@ impl ParallelProcessor {
         Ok(decompressed)
     }
 
-    pub fn get_asn_degree_map(&self) -> DashMap<u32, u64> {
-        let degree_map: DashMap<u32, u64> = DashMap::new();
+    pub fn get_asn_degree_map(&self) -> HashMap<u32, u64> {
+        let mut degree_map: HashMap<u32, u64> = HashMap::new();
 
-        for entry in self.as_link_counts.iter() {
-            let (src, dst) = entry.key();
-            let count = entry.value();
-            *degree_map.entry(*src).or_insert(0).value_mut() += count;
-            *degree_map.entry(*dst).or_insert(0).value_mut() += count;
+        for (&(src, dst), &count) in &self.as_link_counts {
+            *degree_map.entry(src).or_insert(0) += count;
+            *degree_map.entry(dst).or_insert(0) += count;
         }
 
         degree_map
